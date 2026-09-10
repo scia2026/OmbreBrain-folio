@@ -8,16 +8,12 @@ services:
     name: ombre-brain
     env: python
     region: oregon  # 可选: oregon / frankfurt / singapore / ohio
-    plan: starter   # Starter ($7/mo) 付费层 — 免费层无持久盘会丢数据, 必须 Starter 或以上; standard 免冷启动
+    plan: free      # 免费层 — 持久盘改由每30分钟自动备份 + 冷启动自动恢复兜底 ([落落定制] 补丁)
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
 
-    # 持久磁盘 - 存 buckets/ + dehydration_cache.db + embedding 等
-    # ⚠ 不挂 disk 重启会丢数据
-    disk:
-      name: ombre-buckets
-      mountPath: /opt/render/project/src/buckets
-      sizeGB: 1  # 1GB 通常够用 (200 条记忆约 1MB)
+    # [落落定制] 免费层无持久盘: buckets/ 数据由 auto-backup 每30分钟推 GitHub,
+    # 冷启动时 /health 恢复钩子从 OMBRE_BACKUP_REPO 自动拉回, 不挂 disk。
 
     envVars:
       # ─── 系统级 (无需用户填) ───
@@ -62,4 +58,4 @@ services:
       - key: OMBRE_BACKUP_TOKEN
         sync: false  # GitHub Personal Access Token, 权限 repo
       - key: OMBRE_BACKUP_USER
-        value: ombre-bot
+        value: scia2026
