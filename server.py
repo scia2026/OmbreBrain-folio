@@ -101,6 +101,12 @@ mcp = FastMCP(
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     from starlette.responses import JSONResponse
+    # [落落定制] 惰性触发开机恢复: 每次唤醒/冷启动后的首次 /health 都会拉一次
+    try:
+        import restore
+        restore.ensure_restore()
+    except Exception as _re:
+        logger.warning(f"[restore] hook error: {_re}")
     try:
         stats = await bucket_mgr.get_stats()
         return JSONResponse({
@@ -4069,6 +4075,65 @@ if __name__ == "__main__":
 
         t = threading.Thread(target=_start_keepalive, daemon=True)
         t.start()
+
+        # --- [落落定制] Auto backup: push buckets/ to OMBRE_BACKUP_REPO every 30min ---
+        # --- 每 30 分钟把 buckets/ 备份到远端仓, 免费层无持久盘的救命绳 ---
+        # --- 阀门: OMBRE_AUTO_BACKUP=off 关闭 ---
+        async def _auto_backup_loop():
+            await asyncio.sleep(60)  # 等服务就绪 + /health 恢复钩子先跑完
+            import shutil as _shutil
+            import tempfile as _tempfile
+            from dulwich import porcelain
+            while True:
+                try:
+                    repo_url = os.environ.get("OMBRE_BACKUP_REPO", "").strip()
+                    token = os.environ.get("OMBRE_BACKUP_TOKEN", "").strip()
+                    user = os.environ.get("OMBRE_BACKUP_USER", "ombre-bot").strip()
+                    if repo_url and token and "https://" in repo_url:
+                        buckets_dir = config.get("buckets_dir", "./buckets")
+                        if os.path.isdir(buckets_dir):
+                            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                            auth_url = repo_url.replace("https://", f"https://x-access-token:{token}@", 1)
+                            tmp = _tempfile.mkdtemp(prefix="ombre-auto-backup-")
+                            try:
+                                try:
+                                    porcelain.clone(auth_url, tmp, depth=1, checkout=True,
+                                                    errstream=open(os.devnull, "wb"))
+                                except Exception:
+                                    _shutil.rmtree(tmp, ignore_errors=True)
+                                    porcelain.init(tmp)
+                                _shutil.copytree(buckets_dir, os.path.join(tmp, "buckets"), dirs_exist_ok=True)
+                                rc = os.path.join(buckets_dir, "runtime_config.json")
+                                if os.path.isfile(rc):
+                                    _shutil.copy2(rc, os.path.join(tmp, "runtime_config.json"))
+                                n = 0
+                                for _root, _dirs, _files in os.walk(tmp):
+                                    if ".git" in _dirs:
+                                        _dirs.remove(".git")
+                                    for _f in _files:
+                                        porcelain.add(tmp, os.path.join(os.path.relpath(_root, tmp), _f.replace(os.sep, "/")))
+                                        n += 1
+                                if n:
+                                    author = f"{user} <{user}@users.noreply.github.com>"
+                                    porcelain.commit(tmp, f"auto-backup {ts} ({n} files)", author=author,
+                                                     committer=author)
+                                    porcelain.push(tmp, auth_url, refspecs=b"HEAD:refs/heads/main")
+                                    logger.info(f"[auto-backup] pushed {n} files at {ts}")
+                                else:
+                                    logger.info("[auto-backup] nothing to commit")
+                            finally:
+                                _shutil.rmtree(tmp, ignore_errors=True)
+                    else:
+                        logger.warning("[auto-backup] OMBRE_BACKUP_REPO/TOKEN not set, skip")
+                except Exception as e:
+                    logger.warning(f"[auto-backup] failed: {type(e).__name__}: {e}")
+                await asyncio.sleep(1800)
+        def _start_auto_backup():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_auto_backup_loop())
+        if os.environ.get("OMBRE_AUTO_BACKUP", "on").strip().lower() != "off":
+            tb = threading.Thread(target=_start_auto_backup, daemon=True, name="ombre-auto-backup")
+            tb.start()
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---
