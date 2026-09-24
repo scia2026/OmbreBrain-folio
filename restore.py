@@ -70,8 +70,11 @@ def restore_from_repo(force=False):
                     shutil.copy2(s, d)
                     n_new += 1
                 else:
-                    # 双方都在: 留较新的一份 (本地可能是唤醒后新写入的)
-                    if os.path.getmtime(s) > os.path.getmtime(d):
+                    # [落落定制-内容权威] 备份仓为权威源: 同名文件一律以备份仓为准
+                    # 原先按 mtime 比较, 导致清洗后的新内容因时间戳不新而被跳过
+                    with open(s, 'rb') as fa, open(d, 'rb') as fb:
+                        same = (fa.read() == fb.read())
+                    if not same:
                         shutil.copy2(s, d)
                         n_new += 1
                     else:
