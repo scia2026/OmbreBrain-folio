@@ -3335,6 +3335,20 @@ async def api_backup(request):
             for f in files:
                 rel = os.path.relpath(os.path.join(root, f), tmp)
                 all_files.append(rel)
+        # [落落定制 2026-09-28] 反删除: 仓库里存在但活库已删的文件, index 里还挂着,
+        # 不摘掉的话 commit 永远不带删除动作 -> 删除白做, 容器重启 restore 一拉就回魂。
+        # 先把 index 里指向"已不存在的文件"的条目摘掉, 再 add 现存文件。
+        try:
+            from dulwich.repo import Repo as _Repo
+            _idx = _Repo(tmp).open_index()
+            _stale = [p for p in list(_idx)
+                      if not os.path.exists(os.path.join(tmp, p.decode("utf-8", "surrogateescape")))]
+            if _stale:
+                for p in _stale:
+                    del _idx[p]
+                _idx.write()
+        except Exception as _pe:
+            logger.warning(f"[backup] prune index failed: {type(_pe).__name__}: {_pe}")
         if not all_files:
             return JSONResponse({"ok": True, "message": "无文件可备份"})
         porcelain.add(tmp, paths=all_files)
